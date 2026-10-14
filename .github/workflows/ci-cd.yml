@@ -1,0 +1,88 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest --cov=app --cov-report=term-missing
+
+  container:
+    name: Build and smoke-test the image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t riskdesk:ci .
+      - name: Run the container and call it over HTTP
+        run: |
+          docker run -d --name riskdesk -p 8080:8080 -e API_KEY=ci-smoke-test-key-123 riskdesk:ci
+          for i in $(seq 1 30); do curl -fsS localhost:8080/health && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/incidents)" = "401"
+          curl -fsS -X POST localhost:8080/incidents \
+            -H "X-API-Key: ci-smoke-test-key-123" -H "Content-Type: application/json" \
+            -d '{"title":"Smoke test","description":"Settlement failed after a manual error.","business_unit":"Ops","event_date":"2026-10-14"}'
+      - if: failure()
+        run: docker logs riskdesk
+
+  deploy:
+    name: Deploy to AWS and test the live URL
+    needs: container
+    # Skips cleanly until the AWS side is set up (see README).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    concurrency: deploy
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ap-southeast-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: sam build
+      - name: Deploy
+        env:
+          RISKDESK_API_KEY: ${{ secrets.RISKDESK_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          overrides="ApiKey=$RISKDESK_API_KEY"
+          if [ -n "$ANTHROPIC_API_KEY" ]; then overrides="$overrides AnthropicApiKey=$ANTHROPIC_API_KEY"; fi
+          sam deploy --stack-name riskdesk --region "$AWS_REGION" \
+            --resolve-s3 --resolve-image-repos --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset --no-fail-on-empty-changeset \
+            --parameter-overrides $overrides
+      - name: End-to-end test against the deployed URL
+        env:
+          API_KEY: ${{ secrets.RISKDESK_API_KEY }}
+        run: |
+          export BASE_URL=$(aws cloudformation describe-stacks --stack-name riskdesk \
+            --query "Stacks[0].Outputs[?OutputKey=='FunctionUrl'].OutputValue" --output text)
+          echo "Live at $BASE_URL"
+          pip install -r requirements-dev.txt
+          pytest tests/e2e -v

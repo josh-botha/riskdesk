@@ -1,0 +1,19 @@
+[project]
+name = "riskdesk"
+version = "1.0.0"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["B008"]  # FastAPI's Depends()/Query() defaults are the intended pattern
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "E501"]

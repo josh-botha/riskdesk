@@ -1,0 +1,13 @@
+.venv
+.git
+.github
+tests
+infra
+.pytest_cache
+.ruff_cache
+.coverage
+__pycache__
+*.md
+template.yaml
+samconfig.toml
+.aws-sam
